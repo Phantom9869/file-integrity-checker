@@ -279,3 +279,98 @@ def test_new_symlink_is_not_reported_as_new_file(tmp_path: Path) -> None:
 
     assert report.severity == "OK"
     assert report.new == []
+
+
+def test_create_rejects_missing_folder(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="Folder not found"):
+        _create(tmp_path / "nope", tmp_path / "baseline.json")
+
+
+def test_create_rejects_file_as_folder(tmp_path: Path) -> None:
+    not_a_dir = _write(tmp_path / "file.txt")
+    with pytest.raises(ValueError, match="Not a directory"):
+        _create(not_a_dir, tmp_path / "baseline.json")
+
+
+def test_check_rejects_missing_folder(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "a.txt")
+    baseline = tmp_path / "baseline.json"
+    _create(folder, baseline)
+    missing = tmp_path / "gone"
+    with pytest.raises(FileNotFoundError, match="Folder not found"):
+        _check(missing, baseline)
+
+
+def test_corrupt_baseline_raises_value_error(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    folder.mkdir()
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        _check(folder, baseline)
+
+
+def test_legacy_baseline_without_files_field_is_rejected(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    folder.mkdir()
+    baseline = tmp_path / "baseline.json"
+    # The old repo baseline was a flat path-to-hash map with no "files" key.
+    baseline.write_text(
+        '{"file_integrity.py": "1c77fea67a454a54ca96f3a3b7138f5cf6dfb615ca8ed5e4266a836cfcc12f4a"}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing the 'files' field"):
+        _check(folder, baseline)
+
+
+def test_baseline_with_unknown_algorithm_is_rejected(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    folder.mkdir()
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        '{"algorithm": "md5", "files": {"a.txt": {"hash": "abc"}}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Unsupported algorithm 'md5'"):
+        _check(folder, baseline)
+
+
+@pytest.mark.parametrize("threads", [0, -1, True])
+def test_invalid_thread_count_is_rejected(tmp_path: Path, threads: int) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "a.txt")
+    with pytest.raises(ValueError, match="threads must be a positive integer"):
+        fim.create_baseline(str(folder), str(tmp_path / "baseline.json"), threads=threads)
+
+
+def test_file_that_vanishes_during_scan_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "stay.txt")
+    _write(folder / "gone.txt")
+    baseline = tmp_path / "baseline.json"
+
+    real_meta = fim._get_meta
+
+    def flaky(filepath, relative, algorithm):
+        if relative == "gone.txt":
+            raise FileNotFoundError("vanished")
+        return real_meta(filepath, relative, algorithm)
+
+    monkeypatch.setattr(fim, "_get_meta", flaky)
+    _create(folder, baseline)
+
+    import json
+
+    data = json.loads(baseline.read_text(encoding="utf-8"))
+    assert "stay.txt" in data["files"]
+    assert "gone.txt" not in data["files"]
+
+
+def test_atomic_write_replaces_file_and_leaves_no_temp(tmp_path: Path) -> None:
+    path = tmp_path / "out.json"
+    path.write_text("stale", encoding="utf-8")
+    fim._atomic_write_text(path, '{"ok": true}')
+    assert path.read_text(encoding="utf-8") == '{"ok": true}'
+    leftovers = list(tmp_path.glob(".fim-*.tmp"))
+    assert leftovers == []

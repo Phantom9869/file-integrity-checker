@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import stat
+import tempfile
 import time
 import fnmatch
 import argparse
@@ -130,8 +131,60 @@ class IntegrityReport:
         }
 
     def save(self, path: str) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), indent=2))
+        _atomic_write_text(Path(path), json.dumps(self.to_dict(), indent=2))
         print(f"  Report saved → '{path}'")
+
+# ── I/O helpers ───────────────────────────────────────────────────────
+
+def _validate_threads(threads: int) -> int:
+    if not isinstance(threads, int) or isinstance(threads, bool) or threads < 1:
+        raise ValueError(f"threads must be a positive integer, got {threads!r}")
+    return threads
+
+def _require_folder(folder: str) -> Path:
+    folder_p = Path(folder).resolve()
+    if not folder_p.exists():
+        raise FileNotFoundError(f"Folder not found: '{folder_p}'")
+    if not folder_p.is_dir():
+        raise ValueError(f"Not a directory: '{folder_p}'")
+    return folder_p
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text to path via a temp file + replace so a crash cannot truncate it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".fim-", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+def _load_baseline(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Baseline at '{path}' is not valid JSON: {exc.msg}"
+        ) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("files"), dict):
+        raise ValueError(
+            f"Baseline at '{path}' is missing the 'files' field. "
+            "Recreate it with the 'create' command."
+        )
+    algorithm = data.get("algorithm", DEFAULT_ALGORITHM)
+    if algorithm not in SUPPORTED_ALGORITHMS:
+        raise ValueError(
+            f"Unsupported algorithm '{algorithm}' in baseline. "
+            f"Use: {', '.join(sorted(SUPPORTED_ALGORITHMS))}"
+        )
+    return data
 
 # ── Hashing ───────────────────────────────────────────────────────────
 
@@ -224,7 +277,8 @@ def _scan_all(
         filepath, relative = item
         try:
             return relative, _get_meta(filepath, relative, algorithm)
-        except PermissionError:
+        except OSError:
+            # Permission denied, file vanished mid-scan, and similar I/O errors
             return relative, None
 
     with ThreadPoolExecutor(max_workers=threads) as pool:
@@ -256,10 +310,11 @@ def create_baseline(
         threads:       Thread-pool size for concurrent hashing.
     """
     if algorithm not in SUPPORTED_ALGORITHMS:
-        raise ValueError(f"Unsupported algorithm '{algorithm}'. Use: {SUPPORTED_ALGORITHMS}")
+        raise ValueError(f"Unsupported algorithm '{algorithm}'. Use: {', '.join(sorted(SUPPORTED_ALGORITHMS))}")
 
-    folder_p   = Path(folder).resolve()
+    folder_p   = _require_folder(folder)
     baseline_p = Path(baseline_path).resolve()
+    threads    = _validate_threads(threads)
     exclude    = exclude or []
 
     files = list(_walk(folder_p, exclude, baseline_p))
@@ -274,7 +329,7 @@ def create_baseline(
         "exclude":    exclude,
         "files":      {rel: meta.to_dict() for rel, meta in results.items()},
     }
-    baseline_p.write_text(json.dumps(data, indent=2))
+    _atomic_write_text(baseline_p, json.dumps(data, indent=2))
 
     print(f"  ✅ Baseline saved → '{baseline_p}'")
     print(f"     {len(results)} hashed  |  {len(skipped)} skipped")
@@ -295,12 +350,13 @@ def check_integrity(
     if not baseline_p.exists():
         raise FileNotFoundError(f"No baseline at '{baseline_p}'. Run 'create' first.")
 
-    data        = json.loads(baseline_p.read_text())
+    data        = _load_baseline(baseline_p)
     algorithm   = data.get("algorithm", DEFAULT_ALGORITHM)
     baseline_at = data.get("created_at", "unknown")
     stored: dict[str, dict] = data["files"]
 
-    folder_p = Path(folder).resolve()
+    folder_p = _require_folder(folder)
+    threads  = _validate_threads(threads)
     exclude  = list(set((exclude or []) + data.get("exclude", [])))
 
     files = list(_walk(folder_p, exclude, baseline_p))
