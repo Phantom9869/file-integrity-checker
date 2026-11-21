@@ -374,3 +374,75 @@ def test_atomic_write_replaces_file_and_leaves_no_temp(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == '{"ok": true}'
     leftovers = list(tmp_path.glob(".fim-*.tmp"))
     assert leftovers == []
+
+
+def test_main_create_and_check_ok(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "a.txt")
+    baseline = tmp_path / "baseline.json"
+    assert fim.main(["create", str(folder), "-b", str(baseline), "-t", "1"]) == fim.EXIT_OK
+    assert fim.main(["check", str(folder), "-b", str(baseline), "-t", "1"]) == fim.EXIT_OK
+
+
+def test_main_check_warning_and_critical(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "a.txt")
+    baseline = tmp_path / "baseline.json"
+    assert fim.main(["create", str(folder), "-b", str(baseline), "-t", "1"]) == 0
+
+    _write(folder / "b.txt", "new")
+    assert fim.main(["check", str(folder), "-b", str(baseline), "-t", "1"]) == fim.EXIT_WARNING
+
+    (folder / "a.txt").write_text("edited", encoding="utf-8")
+    assert fim.main(["check", str(folder), "-b", str(baseline), "-t", "1"]) == fim.EXIT_CRITICAL
+
+
+def test_main_missing_baseline_prints_error_and_exits_3(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = tmp_path / "watched"
+    folder.mkdir()
+    code = fim.main(["check", str(folder), "-b", str(tmp_path / "missing.json")])
+    captured = capsys.readouterr()
+    assert code == fim.EXIT_ERROR
+    assert "Error:" in captured.err
+    assert "No baseline" in captured.err
+    assert captured.err.endswith("\n")
+
+
+def test_main_rejects_non_positive_threads(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    folder.mkdir()
+    with pytest.raises(SystemExit) as exc:
+        fim.main(["create", str(folder), "-t", "0"])
+    assert exc.value.code == fim.EXIT_ERROR
+
+
+def test_main_rejects_non_positive_interval(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    folder.mkdir()
+    with pytest.raises(SystemExit) as exc:
+        fim.main(["watch", str(folder), "-i", "-5"])
+    assert exc.value.code == fim.EXIT_ERROR
+
+
+def test_watch_rejects_invalid_interval(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="interval must be a positive integer"):
+        fim.watch(str(tmp_path), str(tmp_path / "b.json"), interval=0)
+
+
+def test_main_saves_json_report(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "a.txt")
+    baseline = tmp_path / "baseline.json"
+    out = tmp_path / "report.json"
+    fim.main(["create", str(folder), "-b", str(baseline), "-t", "1"])
+    (folder / "a.txt").write_text("edited", encoding="utf-8")
+    code = fim.main([
+        "check", str(folder), "-b", str(baseline), "-t", "1", "-o", str(out),
+    ])
+    assert code == fim.EXIT_CRITICAL
+    assert out.is_file()
+    import json
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["severity"] == "CRITICAL"

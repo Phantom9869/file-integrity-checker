@@ -8,6 +8,7 @@ import tempfile
 import time
 import fnmatch
 import argparse
+import sys
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -23,6 +24,12 @@ CHUNK_SIZE        = 65536   # 64 KB
 DEFAULT_THREADS   = 8
 DEFAULT_POLL_SECS = 30
 SUPPORTED_ALGORITHMS = {"sha256", "sha512", "blake2b"}
+
+# CLI exit codes: check uses 0/1/2 by severity; 3 is any operational error.
+EXIT_OK       = 0
+EXIT_WARNING  = 1
+EXIT_CRITICAL = 2
+EXIT_ERROR    = 3
 
 # ── Enums ─────────────────────────────────────────────────────────────
 
@@ -423,6 +430,8 @@ def watch(
     threads:       int       = DEFAULT_THREADS,
 ) -> None:
     """Poll folder on a fixed interval; print full report only on violations."""
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 1:
+        raise ValueError(f"interval must be a positive integer, got {interval!r}")
     print(f"\n  👁  Watching '{folder}' every {interval}s  (Ctrl-C to stop)\n")
     check_num = 0
     try:
@@ -446,56 +455,89 @@ def watch(
 
 # ── CLI ───────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive integer, got {value!r}"
+        ) from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive integer, got {value!r}"
+        )
+    return parsed
+
+class _ArgumentParser(argparse.ArgumentParser):
+    """Use exit code 3 for usage errors so it is not confused with CRITICAL."""
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_ERROR, f"{self.prog}: error: {message}\n")
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _ArgumentParser(
         prog="fim",
         description="File Integrity Monitor — detect unauthorised changes to files",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # fim create <folder>
     p_c = sub.add_parser("create", help="Create a new hash baseline")
     p_c.add_argument("folder")
     p_c.add_argument("-b", "--baseline",  default=DEFAULT_BASELINE)
-    p_c.add_argument("-a", "--algorithm", default=DEFAULT_ALGORITHM, choices=SUPPORTED_ALGORITHMS)
+    p_c.add_argument("-a", "--algorithm", default=DEFAULT_ALGORITHM, choices=sorted(SUPPORTED_ALGORITHMS))
     p_c.add_argument("-e", "--exclude",   nargs="*", default=[], metavar="GLOB",
                      help="Glob patterns to skip, e.g. '*.log' '.git/*'")
-    p_c.add_argument("-t", "--threads",   type=int, default=DEFAULT_THREADS)
+    p_c.add_argument("-t", "--threads",   type=_positive_int, default=DEFAULT_THREADS)
 
-    # fim check <folder>
     p_k = sub.add_parser("check", help="Check integrity against the baseline")
     p_k.add_argument("folder")
     p_k.add_argument("-b", "--baseline", default=DEFAULT_BASELINE)
     p_k.add_argument("-e", "--exclude",  nargs="*", default=[], metavar="GLOB")
-    p_k.add_argument("-t", "--threads",  type=int, default=DEFAULT_THREADS)
+    p_k.add_argument("-t", "--threads",  type=_positive_int, default=DEFAULT_THREADS)
     p_k.add_argument("-o", "--output",   default=None, help="Save report as JSON")
     p_k.add_argument("--show-ok", action="store_true", help="Also list unchanged files")
 
-    # fim watch <folder>
     p_w = sub.add_parser("watch", help="Continuously monitor for changes")
     p_w.add_argument("folder")
     p_w.add_argument("-b", "--baseline", default=DEFAULT_BASELINE)
-    p_w.add_argument("-i", "--interval", type=int, default=DEFAULT_POLL_SECS)
+    p_w.add_argument("-i", "--interval", type=_positive_int, default=DEFAULT_POLL_SECS)
     p_w.add_argument("-e", "--exclude",  nargs="*", default=[], metavar="GLOB")
-    p_w.add_argument("-t", "--threads",  type=int, default=DEFAULT_THREADS)
+    p_w.add_argument("-t", "--threads",  type=_positive_int, default=DEFAULT_THREADS)
+    return parser
 
-    args = parser.parse_args()
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     try:
         if args.command == "create":
             create_baseline(args.folder, args.baseline, args.algorithm,
                             args.exclude, args.threads)
+            return EXIT_OK
 
-        elif args.command == "check":
+        if args.command == "check":
             report = check_integrity(args.folder, args.baseline,
                                      args.exclude, args.threads)
             report.display(show_ok=args.show_ok)
             if args.output:
                 report.save(args.output)
+            return {
+                "OK": EXIT_OK,
+                "WARNING": EXIT_WARNING,
+                "CRITICAL": EXIT_CRITICAL,
+            }[report.severity]
 
-        elif args.command == "watch":
-            watch(args.folder, args.baseline, args.interval,
-                  args.exclude, args.threads)
+        watch(args.folder, args.baseline, args.interval,
+              args.exclude, args.threads)
+        return EXIT_OK
 
-    except (FileNotFoundError, ValueError) as e:
-        print(f"\n  Error: {e}")
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        return 130
+
+if __name__ == "__main__":
+    sys.exit(main())
