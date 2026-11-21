@@ -1,3 +1,4 @@
+from __future__ import annotations
 # file_integrity_monitor.py
 import hashlib
 import json
@@ -275,17 +276,27 @@ def check_integrity(
         stored_meta = FileMeta.from_dict(path, stored_dict)
         if path not in current:
             changes.append(FileChange(path, Status.MISSING))
-        elif current[path].hash != stored_meta.hash:
+            continue
+
+        cur = current[path]
+        parts = []
+        if cur.hash != stored_meta.hash:
             # Describe exactly what the OS-level metadata shows changed
-            cur   = current[path]
-            parts = []
             if cur.size != stored_meta.size:
                 delta = cur.size - stored_meta.size
                 parts.append(f"size {stored_meta.size}→{cur.size} ({delta:+,} bytes)")
-            if cur.permissions != stored_meta.permissions:
-                parts.append(f"perms {stored_meta.permissions}→{cur.permissions}")
-            changes.append(FileChange(path, Status.MODIFIED,
-                                      ", ".join(parts) if parts else "hash mismatch"))
+            else:
+                parts.append("hash mismatch")
+        # Permission-only changes must be flagged too: the hash can stay the
+        # same after chmod, which previously left the file marked OK.
+        # "?" is the placeholder used when an older baseline omitted perms.
+        if (
+            stored_meta.permissions != "?"
+            and cur.permissions != stored_meta.permissions
+        ):
+            parts.append(f"perms {stored_meta.permissions}→{cur.permissions}")
+        if parts:
+            changes.append(FileChange(path, Status.MODIFIED, ", ".join(parts)))
         else:
             changes.append(FileChange(path, Status.OK))
 
