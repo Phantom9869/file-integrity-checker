@@ -446,3 +446,20 @@ def test_main_saves_json_report(tmp_path: Path) -> None:
     import json
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data["severity"] == "CRITICAL"
+
+def test_readme_documents_the_cli() -> None:
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    assert "fim create" in text
+    assert "fim check" in text
+    assert "fim watch" in text
+    assert "Choose option 1" not in text
+    for code, label in (("0", "No changes"), ("1", "WARNING"), ("2", "CRITICAL"), ("3", "Usage error")):
+        assert code in text and label.split()[0] in text
+
+
+def test_pyproject_exposes_fim_entry_point() -> None:
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    assert "fim = \"file_integrity:main\"" in text
+    assert callable(fim.main)

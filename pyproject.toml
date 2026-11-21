@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "file-integrity-checker"
+version = "0.1.0"
+description = "Detect file tampering with SHA-256, SHA-512 or BLAKE2b hashing."
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.scripts]
+fim = "file_integrity:main"
+
+[tool.setuptools]
+py-modules = ["file_integrity"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
