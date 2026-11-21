@@ -2,6 +2,7 @@ from __future__ import annotations
 # file_integrity_monitor.py
 import hashlib
 import json
+import os
 import stat
 import time
 import fnmatch
@@ -138,6 +139,8 @@ def _make_hasher(algorithm: str):
     return hashlib.blake2b() if algorithm == "blake2b" else hashlib.new(algorithm)
 
 def hash_file(filepath: Path, algorithm: str = DEFAULT_ALGORITHM) -> str:
+    if filepath.is_symlink():
+        raise OSError(f"Refusing to hash symlink: {filepath}")
     h = _make_hasher(algorithm)
     with open(filepath, "rb") as f:
         for chunk in iter(lambda: f.read(CHUNK_SIZE), b""):
@@ -145,11 +148,14 @@ def hash_file(filepath: Path, algorithm: str = DEFAULT_ALGORITHM) -> str:
     return h.hexdigest()
 
 def _get_meta(filepath: Path, relative: str, algorithm: str) -> FileMeta:
-    """Hash + stat in one pass — avoids a second open() for metadata."""
-    st = filepath.stat()
+    """Hash the file, then lstat it so a swapped-in symlink is not followed."""
+    digest = hash_file(filepath, algorithm)
+    st = filepath.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        raise OSError(f"Refusing to hash symlink: {filepath}")
     return FileMeta(
         path=relative,
-        hash=hash_file(filepath, algorithm),
+        hash=digest,
         size=st.st_size,
         mtime=st.st_mtime,
         permissions=oct(stat.S_IMODE(st.st_mode)),
@@ -157,18 +163,51 @@ def _get_meta(filepath: Path, relative: str, algorithm: str) -> FileMeta:
 
 # ── File walking ──────────────────────────────────────────────────────
 
+def _contained_path(folder: Path, relative: str) -> Path | None:
+    """Return folder/relative only if relative stays inside folder."""
+    if not relative or os.path.isabs(relative):
+        return None
+    parts = Path(relative).parts
+    if any(part in (os.pardir, "..") for part in parts):
+        return None
+    return folder / relative
+
+def _is_excluded(relative: str, exclude: list[str]) -> bool:
+    posix = relative.replace(os.sep, "/")
+    return any(
+        fnmatch.fnmatch(relative, pat) or fnmatch.fnmatch(posix, pat)
+        for pat in exclude
+    )
+
 def _walk(folder: Path, exclude: list[str],
           baseline_path: Path) -> Iterator[tuple[Path, str]]:
-    """Yield (abs_path, rel_path) for every non-excluded, non-baseline file."""
-    for filepath in sorted(folder.rglob("*")):
-        if not filepath.is_file():
-            continue
-        if filepath.resolve() == baseline_path.resolve():
-            continue
-        relative = str(filepath.relative_to(folder))
-        if any(fnmatch.fnmatch(relative, pat) for pat in exclude):
-            continue
-        yield filepath, relative
+    """Yield (abs_path, rel_path) for regular files; never follow symlinks."""
+    try:
+        baseline_resolved = baseline_path.resolve()
+    except OSError:
+        baseline_resolved = baseline_path
+
+    for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
+        # os.walk already skips directory symlinks; keep the filter as a belt.
+        dirnames[:] = [
+            name for name in sorted(dirnames)
+            if not Path(dirpath, name).is_symlink()
+        ]
+        for name in sorted(filenames):
+            filepath = Path(dirpath) / name
+            if filepath.is_symlink():
+                continue
+            if not filepath.is_file():
+                continue
+            try:
+                if filepath.resolve() == baseline_resolved:
+                    continue
+            except OSError:
+                continue
+            relative = str(filepath.relative_to(folder))
+            if _is_excluded(relative, exclude):
+                continue
+            yield filepath, relative
 
 # ── Concurrent scanning ───────────────────────────────────────────────
 
@@ -275,7 +314,12 @@ def check_integrity(
     for path, stored_dict in stored.items():
         stored_meta = FileMeta.from_dict(path, stored_dict)
         if path not in current:
-            changes.append(FileChange(path, Status.MISSING))
+            on_disk = _contained_path(folder_p, path)
+            if on_disk is not None and on_disk.is_symlink():
+                changes.append(FileChange(
+                    path, Status.MODIFIED, "replaced by a symlink"))
+            else:
+                changes.append(FileChange(path, Status.MISSING))
             continue
 
         cur = current[path]

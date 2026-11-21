@@ -208,3 +208,74 @@ def test_report_save_omits_ok_entries(tmp_path: Path) -> None:
     statuses = {c["path"]: c["status"] for c in data["changes"]}
     assert statuses == {"a.txt": "MODIFIED"}
     assert "b.txt" not in statuses
+
+
+def test_symlink_to_file_is_not_inventoried(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "real.txt", "inside")
+    outside = _write(tmp_path / "outside.txt", "secret")
+    (folder / "link.txt").symlink_to(outside)
+    baseline = tmp_path / "baseline.json"
+    _create(folder, baseline)
+
+    report = _check(folder, baseline)
+
+    assert report.severity == "OK"
+    assert {c.path for c in report.ok} == {"real.txt"}
+    assert "link.txt" not in {c.path for c in report.changes}
+
+
+def test_directory_symlink_is_not_followed(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "real.txt")
+    outside_dir = tmp_path / "elsewhere"
+    _write(outside_dir / "secret.txt", "do not hash")
+    (folder / "escape").symlink_to(outside_dir)
+    baseline = tmp_path / "baseline.json"
+    _create(folder, baseline)
+
+    report = _check(folder, baseline)
+
+    assert report.severity == "OK"
+    assert {c.path for c in report.ok} == {"real.txt"}
+    assert all("secret.txt" not in c.path for c in report.changes)
+    assert all("escape" not in c.path for c in report.changes)
+
+
+def test_tracked_file_replaced_by_symlink_is_modified(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    target = _write(folder / "a.txt", "original")
+    decoy = _write(tmp_path / "decoy.txt", "original")
+    baseline = tmp_path / "baseline.json"
+    _create(folder, baseline)
+
+    target.unlink()
+    target.symlink_to(decoy)
+    report = _check(folder, baseline)
+
+    assert report.severity == "CRITICAL"
+    assert len(report.modified) == 1
+    assert report.modified[0].path == "a.txt"
+    assert report.modified[0].detail == "replaced by a symlink"
+    assert report.missing == []
+
+
+def test_hash_file_refuses_symlink(tmp_path: Path) -> None:
+    real = _write(tmp_path / "real.txt", "data")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    with pytest.raises(OSError, match="Refusing to hash symlink"):
+        fim.hash_file(link)
+
+
+def test_new_symlink_is_not_reported_as_new_file(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "a.txt")
+    baseline = tmp_path / "baseline.json"
+    _create(folder, baseline)
+
+    (folder / "link.txt").symlink_to(folder / "a.txt")
+    report = _check(folder, baseline)
+
+    assert report.severity == "OK"
+    assert report.new == []
