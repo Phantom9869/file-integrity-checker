@@ -268,6 +268,18 @@ def test_hash_file_refuses_symlink(tmp_path: Path) -> None:
         fim.hash_file(link)
 
 
+def test_hash_file_does_not_follow_a_symlink_even_if_the_name_check_misses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The open itself must refuse to follow, not just the is_symlink() pre-check."""
+    real = _write(tmp_path / "real.txt", "secret-target")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+    with pytest.raises(OSError, match="Refusing to hash symlink"):
+        fim.hash_file(link)
+
+
 def test_new_symlink_is_not_reported_as_new_file(tmp_path: Path) -> None:
     folder = tmp_path / "watched"
     _write(folder / "a.txt")

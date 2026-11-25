@@ -1,5 +1,6 @@
 from __future__ import annotations
 # file_integrity_monitor.py
+import errno
 import hashlib
 import json
 import os
@@ -199,13 +200,33 @@ def _make_hasher(algorithm: str):
     return hashlib.blake2b() if algorithm == "blake2b" else hashlib.new(algorithm)
 
 def hash_file(filepath: Path, algorithm: str = DEFAULT_ALGORITHM) -> str:
-    if filepath.is_symlink():
+    """Hash a regular file, refusing to follow a symlink at open time."""
+    flags = os.O_RDONLY
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    elif filepath.is_symlink():
         raise OSError(f"Refusing to hash symlink: {filepath}")
-    h = _make_hasher(algorithm)
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(CHUNK_SIZE), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    try:
+        fd = os.open(filepath, flags)
+    except OSError as exc:
+        # O_NOFOLLOW fails with ELOOP (or EMLINK on some systems) on a symlink.
+        if filepath.is_symlink() or getattr(exc, "errno", None) in {
+            getattr(errno, "ELOOP", None),
+            getattr(errno, "EMLINK", None),
+        }:
+            raise OSError(f"Refusing to hash symlink: {filepath}") from exc
+        raise
+    try:
+        h = _make_hasher(algorithm)
+        with os.fdopen(fd, "rb") as f:
+            fd = -1
+            for chunk in iter(lambda: f.read(CHUNK_SIZE), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 def _get_meta(filepath: Path, relative: str, algorithm: str) -> FileMeta:
     """Hash the file, then lstat it so a swapped-in symlink is not followed."""
