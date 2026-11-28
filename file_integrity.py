@@ -477,6 +477,7 @@ def watch(
             time.sleep(interval)
     except KeyboardInterrupt:
         print(f"\n  Watch stopped after {check_num} check(s).")
+        raise
 
 # ── CLI ───────────────────────────────────────────────────────────────
 

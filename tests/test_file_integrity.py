@@ -474,6 +474,22 @@ def test_check_time_exclude_does_not_mark_baseline_files_missing(tmp_path: Path)
     assert all(not c.path.endswith(".log") for c in report.changes)
 
 
+def test_watch_ctrl_c_returns_130(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "a.txt")
+    baseline = tmp_path / "baseline.json"
+    _create(folder, baseline)
+
+    def interrupt(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(fim.time, "sleep", interrupt)
+    code = fim.main([
+        "watch", str(folder), "-b", str(baseline), "-i", "1", "-t", "1",
+    ])
+    assert code == 130
+
+
 def test_readme_documents_the_cli() -> None:
 
     readme = Path(__file__).resolve().parents[1] / "README.md"
