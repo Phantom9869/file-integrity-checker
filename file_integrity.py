@@ -396,6 +396,10 @@ def check_integrity(
     changes: list[FileChange] = []
 
     for path, stored_dict in stored.items():
+        # A pattern added at check time should hide the file, not
+        # report it as missing just because it was skipped in the walk.
+        if _is_excluded(path, exclude):
+            continue
         stored_meta = FileMeta.from_dict(path, stored_dict)
         if path not in current:
             on_disk = _contained_path(folder_p, path)

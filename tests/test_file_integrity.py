@@ -459,7 +459,23 @@ def test_main_saves_json_report(tmp_path: Path) -> None:
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data["severity"] == "CRITICAL"
 
+def test_check_time_exclude_does_not_mark_baseline_files_missing(tmp_path: Path) -> None:
+    folder = tmp_path / "watched"
+    _write(folder / "keep.txt")
+    _write(folder / "noise.log", "log")
+    baseline = tmp_path / "baseline.json"
+    _create(folder, baseline)
+
+    report = _check(folder, baseline, exclude=["*.log"])
+
+    assert report.severity == "OK"
+    assert {c.path for c in report.ok} == {"keep.txt"}
+    assert report.missing == []
+    assert all(not c.path.endswith(".log") for c in report.changes)
+
+
 def test_readme_documents_the_cli() -> None:
+
     readme = Path(__file__).resolve().parents[1] / "README.md"
     text = readme.read_text(encoding="utf-8")
     assert "fim create" in text
